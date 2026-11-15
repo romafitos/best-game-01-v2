@@ -1,53 +1,62 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// TIDEKEEPER v2 — input: mouse aim plus one-shot key presses.
+// One job: turn browser events into a control packet the world steps with.
+// Held state (the pointer) is read live; presses are edge-triggered and
+// cleared by poll(), so a press between two frames is never lost and
+// never counted twice.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
+export function createInput(canvas) {
+  let aimX = 700, aimY = 300;
+  let pressed = { flare: false, focus: false, pause: false, restart: false, start: false, mute: false };
 
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+  function canvasPoint(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) * (canvas.width / rect.width),
+      y: (clientY - rect.top) * (canvas.height / rect.height),
+    };
+  }
 
-export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
-
+  canvas.addEventListener('pointermove', (event) => {
+    const p = canvasPoint(event.clientX, event.clientY);
+    aimX = p.x; aimY = p.y;
+  });
+  canvas.addEventListener('pointerdown', (event) => {
+    const p = canvasPoint(event.clientX, event.clientY);
+    aimX = p.x; aimY = p.y;
+    pressed.start = true;
+  });
   window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
+    if (event.repeat) return;
+    switch (event.code) {
+      case 'Space': pressed.flare = true; pressed.start = true; event.preventDefault(); break;
+      case 'Enter': pressed.start = true; event.preventDefault(); break;
+      case 'KeyF': pressed.focus = true; break;
+      case 'KeyP': case 'Escape': pressed.pause = true; break;
+      case 'KeyR': pressed.restart = true; break;
+      case 'KeyM': pressed.mute = true; break;
+      default: break;
+    }
   });
-  window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
+  // A key released while the tab is hidden never sends keyup: clear the
+  // one-shot queue on blur so a stale press cannot fire later.
   window.addEventListener('blur', () => {
-    left = false;
-    right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
+    pressed = { flare: false, focus: false, pause: false, restart: false, start: false, mute: false };
   });
 
   return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
+    // The control packet for one fixed step; one-shot flags clear on read.
+    poll() {
+      const packet = {
+        aimX, aimY,
+        flarePressed: pressed.flare,
+        focusPressed: pressed.focus,
+        pausePressed: pressed.pause,
+        restartPressed: pressed.restart,
+        startPressed: pressed.start,
+        mutePressed: pressed.mute,
+      };
+      pressed = { flare: false, focus: false, pause: false, restart: false, start: false, mute: false };
+      return packet;
     },
   };
 }

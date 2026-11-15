@@ -1,17 +1,22 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
+// TIDEKEEPER v2 — boot and the one loop: input is polled every frame,
+// the world advances in fixed 1/60 s steps (several in a slow frame, none
+// in a fast one), and the renderer paints what is there. The game moves
+// between title, play, night-clear, dawn and wreck; P pauses, R restarts,
+// M mutes, SPACE fires a flare, F focuses the beam.
 //
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// ?seed=N fixes the dealt sea. ?shot=play|title|storm|dawn (with &seed=N)
+// stages that scene instead of running the loop, paints it twice and sets
+// window.__shotReady for a screenshot.
+
+import { VIEW } from './config.js';
+import { createWorld, startNight, stepWorld } from './world.js';
+import { paint } from './render.js';
+import { createInput } from './input.js';
+import { createAudio } from './audio.js';
 import { stageShot } from './shots.js';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
+const STEP = 1 / 60;
+/** The longest frame the loop catches up on; a longer stall is dropped, not replayed. */
 const MAX_FRAME = 0.25;
 
 const params = new URLSearchParams(window.location.search);
@@ -21,112 +26,111 @@ const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() 
 
 const canvas = document.getElementById('game');
 const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
+const ctx = canvas.getContext('2d');
 
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
+function announce(message) {
+  status.textContent = message;
 }
 
 function runShot(name) {
-  const scene = stageShot(name, world);
+  const world = stageShot(name, seed);
+  const ui = { paused: false, muted: false };
   let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
+  function paintFrame() {
+    paint(ctx, world, ui);
     painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
+    if (painted < 2) requestAnimationFrame(paintFrame);
     else window.__shotReady = true;
   }
-  requestAnimationFrame(paint);
+  requestAnimationFrame(paintFrame);
 }
 
 function runGame() {
+  let world = createWorld(seed);
   const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
+  const audio = createAudio();
+  const ui = { paused: false, muted: false };
+  let best = world.best;
   let accumulator = 0;
   let last = performance.now();
+  let prevSaved = 0, prevWrecks = 0, prevNight = 1, prevState = world.state;
 
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startGame() {
-    world.reset();
+  function freshRun() {
+    world = createWorld(Math.floor(Math.random() * 4294967296));
+    prevSaved = 0; prevWrecks = 0; prevNight = 1; prevState = world.state;
     accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
   }
 
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
-  }
-
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
+  function beginNightOne() {
+    startNight(world, 1);
+    audio.ensure();
+    audio.foghorn();
+    announce('Night 1. Guide the boats home with your beam.');
   }
 
   function frame(now) {
     requestAnimationFrame(frame);
     accumulator += Math.min((now - last) / 1000, MAX_FRAME);
     last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
+    const ctrl = input.poll();
+
+    if (ctrl.mutePressed) {
+      ui.muted = audio.toggleMute();
+    }
+    if (ctrl.restartPressed && world.state !== 'title') {
+      freshRun();
+      beginNightOne();
+    } else if (ctrl.startPressed && (world.state === 'title' || world.state === 'dawn' || world.state === 'wreck')) {
+      if (world.state !== 'title') freshRun();
+      beginNightOne();
+    }
+    if (ctrl.pausePressed && world.state === 'play') {
+      ui.paused = !ui.paused;
+      announce(ui.paused ? 'Paused.' : 'Playing.');
+    }
+
+    if (!ui.paused) {
+      const stepCtrl = world.state === 'play'
+        ? { aimX: ctrl.aimX, aimY: ctrl.aimY, flarePressed: ctrl.flarePressed, focusPressed: ctrl.focusPressed }
+        : {};
+      const beforeFlare = world.flares;
+      while (accumulator >= STEP) {
+        stepWorld(world, STEP, stepCtrl);
         accumulator -= STEP;
+        stepCtrl.flarePressed = false;
+        stepCtrl.focusPressed = false;
       }
+      // One-shot sounds, from what changed this frame.
+      if (world.savedThisNight > prevSaved) audio.bell();
+      if (world.wrecks > prevWrecks) audio.thud();
+      if (world.flares < beforeFlare) audio.whoosh();
+      if (world.night > prevNight && world.state === 'play') audio.foghorn();
+      if (world.state !== prevState) {
+        if (world.state === 'dawn') announce(`Dawn breaks. Final score ${world.score}.`);
+        if (world.state === 'wreck') announce(`The rocks claim three. Score ${world.score}.`);
+        if (world.state === 'nightclear') announce(`Night ${world.night} clear.`);
+      }
+      prevSaved = world.savedThisNight;
+      prevWrecks = world.wrecks;
+      prevNight = world.night;
+      prevState = world.state;
+      if (world.best > best) best = world.best;
     } else {
       accumulator = 0;
     }
-    renderer.draw(world.state, screen, best);
+
+    paint(ctx, world, ui);
   }
 
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
+  // Leaving the tab pauses a running game rather than letting boats sail unseen.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
+    if (document.hidden && world.state === 'play' && !ui.paused) {
+      ui.paused = true;
       announce('Paused.');
     }
   });
 
-  announce('Block Dodger. Press Space or click to start.');
+  announce('Tidekeeper. Click or press Enter to start.');
   requestAnimationFrame(frame);
 }
 
