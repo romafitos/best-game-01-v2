@@ -24,6 +24,7 @@ export function createWorld(seed) {
     rocks: [],
     gulls: [],
     particles: [],
+    debris: [], // wrecked hulls left on the rocks — the lose state stays visible
     docked: [], // boats moored at the pier on the dawn screen
     spawnQueue: [],
     spawnTimer: 0,
@@ -62,6 +63,7 @@ export function startNight(world, n) {
   world.rocks = makeRocks(world.rng, ROCKS.perNight[n - 1]);
   world.gulls = makeGulls(world.rng, cfg.gulls);
   world.particles = [];
+  world.debris = [];
   world.docked = [];
   world.spawnQueue = makeSpawnQueue(world.rng, cfg.boats, n);
   world.spawnTimer = 0.8;
@@ -92,7 +94,7 @@ function makeRocks(rng, count) {
       const dx = o.x - x, dy = o.y - y;
       if (Math.hypot(dx, dy) < o.r + r + 48) { ok = false; break; }
     }
-    if (ok) rocks.push({ id: rocks.length, x, y, r, peaks: 2 + Math.floor(rng() * 2) });
+    if (ok) rocks.push({ id: rocks.length, x, y, r, peaks: 3 + Math.floor(rng() * 3) });
   }
   return rocks;
 }
@@ -286,6 +288,10 @@ function saveBoat(world, boat) {
 function wreckBoat(world, boat, rock) {
   boat.wrecked = true;
   world.wrecks += 1;
+  // A broken hull stays on the rock: the wreck is a place, not a flash.
+  if (world.debris.length < 3) {
+    world.debris.push({ x: boat.x, y: boat.y, r: boat.r, type: boat.type, tilt: (world.rng() - 0.5) * 0.9 });
+  }
   burst(world, boat.x, boat.y, 'wreck', 22);
   world.shake = 1;
   addTextParticle(world, boat.x, boat.y - 26, 'WRECKED');
@@ -303,15 +309,17 @@ function fireFlare(world) {
 function endGame(world, won) {
   world.state = won ? 'dawn' : 'wreck';
   if (won) {
-    // Moor the saved boats in the water ALONGSIDE the pier (x ~1150, not
-    // on top of the dark planks where their hulls would vanish) so the
-    // win screen SHOWS the win: up to six boats, lanterns still burning.
+    // Moor the saved boats in open water ALONGSIDE the pier (never on top
+    // of the dark planks, where their hulls vanished in v2) so the win
+    // screen SHOWS the win: up to six boats in a loose row, lanterns
+    // still burning, hulls big enough to read at a glance.
     const types = ['skiff', 'freighter', 'barge', 'skiff', 'freighter', 'skiff'];
+    const spots = [[1002, 352], [1074, 398], [1146, 348], [1026, 430], [1102, 432], [1168, 394]];
     const n = Math.min(6, world.savedTotal);
     world.docked = [];
     for (let i = 0; i < n; i++) {
       const type = types[i % types.length];
-      world.docked.push({ type, x: 1150, y: 312 + i * 23, r: BOAT_TYPES[type].r * 0.95 });
+      world.docked.push({ type, x: spots[i][0], y: spots[i][1], r: BOAT_TYPES[type].r * 0.95 });
     }
   }
   if (world.score > world.best) {

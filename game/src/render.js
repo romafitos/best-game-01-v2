@@ -28,6 +28,7 @@ export function paint(ctx, world, ui) {
   paintHeadland(ctx, world);
   if (world.state !== 'title' && world.state !== 'dawn' && world.state !== 'wreck') paintBeam(ctx, world);
   paintBoats(ctx, world);
+  paintDebris(ctx, world);
   paintGulls(ctx, world);
   paintParticles(ctx, world);
   paintRain(ctx, world);
@@ -242,39 +243,63 @@ function paintHeadland(ctx, world) {
 function paintRocks(ctx, world) {
   for (const rock of world.rocks) {
     const lit = world.flareTimer > 0;
-    // Jagged silhouette: 2-3 peaks with a seeded wobble, never a smooth dome.
-    ctx.fillStyle = lit ? '#6a5f52' : '#161e28';
+    // Grounding shadow: a dark ellipse under the rock roots it in the
+    // water, so the spikes read as stone rising from the sea, not a
+    // floating tent.
+    ctx.fillStyle = 'rgba(2,8,16,0.4)';
+    ctx.beginPath();
+    ctx.ellipse(rock.x, rock.y + rock.r * 0.55, rock.r + 10, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Jagged silhouette: 3-5 NARROW triangular spikes of uneven height
+    // (up to 1.5r), never a smooth dome — a rock must read as a danger,
+    // not an island. v2's wide mounds + full foam ring read as atolls.
+    ctx.fillStyle = lit ? '#5a5148' : '#0d1219';
     ctx.beginPath();
     ctx.moveTo(rock.x - rock.r, rock.y + rock.r * 0.5);
-    const peaks = rock.peaks || 2;
-    for (let k = 0; k <= peaks; k++) {
-      const fx = -1 + (2 * k) / peaks;
-      const peakH = rock.r * (0.75 + wobble(rock.id, k + 1) * 0.45);
-      const px = rock.x + fx * rock.r * 0.9;
-      const py = rock.y - peakH * (k === 0 || k === peaks ? 0.25 : 1);
-      ctx.lineTo(px, py);
+    const peaks = rock.peaks || 3;
+    for (let k = 0; k < peaks; k++) {
+      // Each spike: a sharp apex with a narrow base, heights alternating
+      // tall/short so the skyline is broken, not rounded.
+      const apexX = rock.x - rock.r * 0.85 + (k + 0.5) * (rock.r * 1.7) / peaks;
+      const apexY = rock.y - rock.r * (0.85 + wobble(rock.id, k + 1) * 0.65);
+      const baseX = rock.x - rock.r * 0.85 + k * (rock.r * 1.7) / peaks;
+      ctx.lineTo(baseX, rock.y + rock.r * 0.15);
+      ctx.lineTo(apexX, apexY);
     }
+    ctx.lineTo(rock.x + rock.r, rock.y + rock.r * 0.15);
     ctx.lineTo(rock.x + rock.r, rock.y + rock.r * 0.5);
     ctx.closePath(); ctx.fill();
-    // Cold rim light on the beam side, so the rock reads as solid stone.
-    ctx.strokeStyle = lit ? 'rgba(255,240,190,0.55)' : 'rgba(150,190,220,0.35)';
+    // Cold rim light on the beam side, tracing one spike edge, so the
+    // rock reads as solid stone with a sharp edge.
+    ctx.strokeStyle = lit ? 'rgba(255,240,190,0.6)' : 'rgba(150,190,220,0.4)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(rock.x - rock.r * 0.7, rock.y - rock.r * 0.3);
-    ctx.quadraticCurveTo(rock.x - rock.r * 0.2, rock.y - rock.r * 0.95, rock.x + rock.r * 0.4, rock.y - rock.r * 0.5);
+    const rimK = 1 + Math.floor(wobble(rock.id, 7) * (peaks - 1));
+    const rimX = rock.x - rock.r * 0.85 + (rimK + 0.5) * (rock.r * 1.7) / peaks;
+    const rimY = rock.y - rock.r * (0.85 + wobble(rock.id, rimK + 1) * 0.65);
+    ctx.moveTo(rimX - rock.r * 0.28, rimY + rock.r * 0.5);
+    ctx.lineTo(rimX, rimY);
+    ctx.lineTo(rimX + rock.r * 0.22, rimY + rock.r * 0.55);
     ctx.stroke();
-    // Breaking spray: white arcs at the base, pulsing with the waves.
+    // Spray ticks at the waterline, left and right of the base — short
+    // dashes, never an arc over the top (v3's arc read as a tent roof).
     const pulse = 0.5 + 0.5 * Math.sin(world.time * 2.4 + rock.id * 1.7);
-    ctx.strokeStyle = `rgba(235,245,255,${0.35 + pulse * 0.4})`;
+    ctx.strokeStyle = `rgba(235,245,255,${0.4 + pulse * 0.45})`;
     ctx.lineWidth = 2.5;
+    for (const [dx, len] of [[-0.9, 10], [-0.2, 7], [0.55, 9]]) {
+      const sx = rock.x + dx * rock.r;
+      const sy = rock.y + rock.r * 0.5 + Math.sin(world.time * 2 + rock.id + dx * 9) * 2;
+      ctx.beginPath();
+      ctx.moveTo(sx - len / 2, sy);
+      ctx.lineTo(sx + len / 2, sy - 2);
+      ctx.stroke();
+    }
+    // Thin foam waterline where the waves break.
+    ctx.strokeStyle = lit ? 'rgba(255,255,255,0.7)' : 'rgba(200,230,250,0.4)';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.ellipse(rock.x, rock.y + rock.r * 0.5, rock.r + 6 + pulse * 4, 7 + pulse * 3, 0, Math.PI, Math.PI * 2);
-    ctx.stroke();
-    // Foam ring where the waves break.
-    ctx.strokeStyle = lit ? 'rgba(255,255,255,0.75)' : 'rgba(200,230,250,0.45)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.ellipse(rock.x, rock.y + rock.r * 0.5, rock.r + 5 + Math.sin(world.time * 2 + rock.id) * 2, 6, 0, 0, Math.PI * 2);
+    ctx.moveTo(rock.x - rock.r - 4, rock.y + rock.r * 0.5);
+    ctx.lineTo(rock.x + rock.r + 4, rock.y + rock.r * 0.5);
     ctx.stroke();
   }
 }
@@ -291,7 +316,8 @@ function paintBeam(ctx, world) {
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   const grad = ctx.createLinearGradient(LAMP.x, LAMP.y, ex, ey);
-  grad.addColorStop(0, 'rgba(255,240,170,0.85)');
+  grad.addColorStop(0, 'rgba(255,240,170,0.55)');
+  grad.addColorStop(0.5, 'rgba(255,240,170,0.28)');
   grad.addColorStop(1, 'rgba(255,240,170,0.02)');
   ctx.fillStyle = grad;
   ctx.beginPath();
@@ -300,7 +326,8 @@ function paintBeam(ctx, world) {
   ctx.lineTo(ex - px * spread, ey - py * spread);
   ctx.closePath(); ctx.fill();
   // Hot core, kept dim enough that boats inside the beam still read.
-  ctx.fillStyle = 'rgba(255,250,210,0.25)';
+  // v2's core washed the whole middle of the frame pale.
+  ctx.fillStyle = 'rgba(255,250,210,0.12)';
   ctx.beginPath();
   ctx.moveTo(LAMP.x, LAMP.y);
   ctx.lineTo(ex + px * spread * 0.35, ey + py * spread * 0.35);
@@ -323,12 +350,12 @@ function paintBeam(ctx, world) {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     const fg = ctx.createRadialGradient(LAMP.x, LAMP.y, 4, LAMP.x, LAMP.y, 320 * f + 80);
-    fg.addColorStop(0, `rgba(255,240,180,${0.75 * f})`);
+    fg.addColorStop(0, `rgba(255,240,180,${0.5 * f})`);
     fg.addColorStop(1, 'rgba(255,240,180,0)');
     ctx.fillStyle = fg;
     ctx.beginPath(); ctx.arc(LAMP.x, LAMP.y, 320 * f + 80, 0, Math.PI * 2); ctx.fill();
     const core = ctx.createRadialGradient(LAMP.x, LAMP.y, 2, LAMP.x, LAMP.y, 90);
-    core.addColorStop(0, `rgba(255,252,220,${0.55 * f})`);
+    core.addColorStop(0, `rgba(255,252,220,${0.4 * f})`);
     core.addColorStop(1, 'rgba(255,252,220,0)');
     ctx.fillStyle = core;
     ctx.beginPath(); ctx.arc(LAMP.x, LAMP.y, 90, 0, Math.PI * 2); ctx.fill();
@@ -413,6 +440,7 @@ function paintHull(ctx, boat, y) {
     ctx.lineTo(boat.x + r, y - r * 0.25);
     ctx.lineTo(boat.x + r * 0.3, y - r * 0.25);
     ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#1c1a16'; ctx.lineWidth = 2; ctx.stroke();
     ctx.fillStyle = '#e8dcc0';
     ctx.beginPath();
     ctx.moveTo(boat.x + 1, y - r * 1.85);
@@ -430,6 +458,7 @@ function paintHull(ctx, boat, y) {
     ctx.lineTo(boat.x + r, y - r * 0.2);
     ctx.lineTo(boat.x + r * 0.4, y - r * 0.2);
     ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#1c1a16'; ctx.lineWidth = 2; ctx.stroke();
     ctx.fillStyle = '#a34d2e';
     ctx.fillRect(boat.x - r * 0.55, y - r * 1.05, r * 0.75, r * 0.55);
     ctx.fillStyle = '#2e7a72';
@@ -445,6 +474,7 @@ function paintHull(ctx, boat, y) {
   ctx.lineTo(boat.x + r, y - r * 0.15);
   ctx.lineTo(boat.x + r * 0.4, y - r * 0.15);
   ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#1c1a16'; ctx.lineWidth = 2; ctx.stroke();
   ctx.fillStyle = '#4a6b4f';
   ctx.fillRect(boat.x - r * 0.5, y - r * 0.85, r * 0.8, r * 0.6);
   ctx.strokeStyle = '#2c2620';
@@ -457,6 +487,39 @@ function paintHull(ctx, boat, y) {
   ctx.moveTo(boat.x + r * 0.75, y - r * 1.5);
   ctx.lineTo(boat.x + r * 0.75, y - r * 0.9);
   ctx.stroke();
+}
+
+// Wrecked hulls stay on the rocks: a broken, half-sunk hull with a
+// snapped mast, tilted where it struck. Static (seeded tilt), so the
+// lose screen is deterministic.
+function paintDebris(ctx, world) {
+  for (const d of world.debris) {
+    const r = d.r;
+    ctx.save();
+    ctx.translate(d.x, d.y + r * 0.4);
+    ctx.rotate(d.tilt);
+    ctx.fillStyle = '#3d2f22';
+    ctx.beginPath();
+    ctx.moveTo(-r, 0);
+    ctx.quadraticCurveTo(-r * 0.5, r * 0.5, r * 0.7, r * 0.4);
+    ctx.lineTo(r, -r * 0.2);
+    ctx.lineTo(r * 0.3, -r * 0.2);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#14100c'; ctx.lineWidth = 2; ctx.stroke();
+    // Snapped mast, leaning over the water.
+    ctx.strokeStyle = '#241d16';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(0, -r * 0.2);
+    ctx.lineTo(r * 0.7, -r * 1.1);
+    ctx.stroke();
+    ctx.restore();
+    // A faint smoke wisp marks the wreck site.
+    ctx.fillStyle = 'rgba(150,150,150,0.4)';
+    ctx.beginPath();
+    ctx.arc(d.x + r * 0.3, d.y - r * 1.2, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 function paintGulls(ctx, world) {
@@ -475,9 +538,17 @@ function paintParticles(ctx, world) {
   for (const p of world.particles) {
     const a = Math.max(0, p.life / p.maxLife);
     if (p.kind === 'text') {
-      ctx.fillStyle = `rgba(255,240,170,${a})`;
-      ctx.font = 'bold 18px Georgia, serif';
+      // Big, outlined popups on a dark backing plate: a "+25 CLOSE!"
+      // must read over the pale beam as well as over dark sea.
+      ctx.font = 'bold 23px Georgia, serif';
       ctx.textAlign = 'center';
+      const w = ctx.measureText(p.text).width;
+      ctx.fillStyle = `rgba(4,10,20,${a * 0.75})`;
+      ctx.fillRect(p.x - w / 2 - 8, p.y - 20, w + 16, 28);
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = `rgba(4,10,20,${a * 0.9})`;
+      ctx.strokeText(p.text, p.x, p.y);
+      ctx.fillStyle = p.text === 'WRECKED' ? `rgba(255,120,90,${a})` : `rgba(255,240,170,${a})`;
       ctx.fillText(p.text, p.x, p.y);
     } else if (p.kind === 'wreck') {
       ctx.fillStyle = `rgba(200,90,60,${a})`;
@@ -639,7 +710,10 @@ function paintBanner(ctx, world) {
 }
 
 function paintDawn(ctx, world) {
-  dimScreen(ctx, 0.35);
+  dimScreen(ctx, 0.28);
+  // The docked boats are the payoff: re-paint them above the dim so
+  // their hulls and lanterns read instead of sinking into the murk.
+  for (const d of world.docked) paintMooredBoat(ctx, d);
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffe9a8';
   ctx.font = 'bold 64px Georgia, serif';
@@ -666,7 +740,7 @@ function paintDawn(ctx, world) {
 }
 
 function paintWreck(ctx, world) {
-  dimScreen(ctx, 0.5);
+  dimScreen(ctx, 0.42);
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ff9a7a';
   ctx.font = 'bold 56px Georgia, serif';

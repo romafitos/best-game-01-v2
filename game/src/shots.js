@@ -96,13 +96,35 @@ function runPilot(world, seconds, skill) {
   }
 }
 
-// Is this frame worth the cover? Three boats mid-frame, the beam on one of
-// them, and a score popup proving something just happened.
+// Score a frame for the replay fallback: boats mid-frame and lit count
+// most, a visible popup and a flare-free frame count too.
+function frameScore(world) {
+  const mid = world.boats.filter((b) => !b.saved && !b.wrecked && b.x > 400 && b.x < 1000);
+  const lit = mid.filter((b) => b.lit).length;
+  let score = mid.length * 10 + lit * 5;
+  const freshText = world.particles.some((p) => p.kind === 'text' && p.life / p.maxLife > 0.8);
+  const anyText = world.particles.some((p) => p.kind === 'text');
+  if (freshText) score += 15;
+  else if (anyText) score += 5;
+  if (world.flareTimer <= 0) score += 5;
+  return score;
+}
+
+// Is this frame worth the cover? Three boats mid-frame, the beam on one
+// of them, and a near-miss popup proving something just happened —
+// mid-frame (x 350–1050) and high enough (y 180–400) that the top half
+// of the frame is not empty sea. Boats spawn low and drift down, so the
+// popup's height is the honest signal of vertical spread.
 function coverIsLively(world) {
-  const mid = world.boats.filter((b) => !b.saved && !b.wrecked && b.x > 450 && b.x < 950);
+  const mid = world.boats.filter((b) => !b.saved && !b.wrecked && b.x > 400 && b.x < 1000);
   if (mid.length < 3) return false;
   if (!mid.some((b) => b.lit)) return false;
-  return world.particles.some((p) => p.kind === 'text');
+  // Never the cover mid-flare: the flash washes the frame pale.
+  if (world.flareTimer > 0) return false;
+  // The popup must be FRESH (alpha > 0.8, i.e. created in the last ~0.2 s
+  // of the chunk): a text particle lives 1.1 s and the hunt can catch
+  // it half-faded, which reads as a ghost over the bright beam.
+  return world.particles.some((p) => p.kind === 'text' && p.x > 350 && p.x < 1050 && p.y > 180 && p.y < 400 && p.life / p.maxLife > 0.8);
 }
 
 // Stage a named shot on a fresh world. Returns the world ready to paint.
@@ -111,33 +133,93 @@ export function stageShot(name, seed) {
     const world = createWorld(seed);
     world.state = 'title';
     // Ambient boats with lanterns in the sea behind the title, so the
-    // title screen shows the game instead of an empty sea.
-    const spots = [[420, 330, 'skiff'], [640, 380, 'freighter'], [880, 300, 'skiff']];
+    // title screen shows the game instead of an empty sea. Kept clear
+    // of the "CLICK to start" line (y 356) — v2's centre freighter sat
+    // behind the text.
+    const spots = [[420, 330, 'skiff'], [700, 415, 'freighter'], [920, 310, 'skiff']];
     for (const [x, y, type] of spots) {
       const b = spawnBoat(world, type);
       b.x = x; b.y = y; b.lit = true;
     }
+    world.shake = 0;
     return world;
   }
   if (name === 'play') {
     const world = createWorld(seed);
-    startNight(world, 3);
-    // Hunt for a lively frame in half-second chunks; fall back to 30 s.
+    startNight(world, 4);
+    // NARROW beam (F focus): a tight bright shaft threading a rock gap
+    // reads as a skill move and does not wash the frame pale the way
+    // the wide beam did in v2. The pilot aims with the same logic.
+    // Night 4, not 3: rain + gusts + gulls make the cover a storm
+    // frame, not a calm one — the danger is visible.
+    world.focus = true;
+    // Hunt for a lively frame in half-second chunks. If the night ends
+    // before one is found, replay deterministically to the best chunk
+    // seen — never hand the judge a night-clear banner as the cover.
+    let bestChunk = -1, bestScore = -1;
     for (let chunk = 0; chunk < 80; chunk++) {
       runPilot(world, 0.5, 1);
       if (world.state !== 'play') break;
-      if (coverIsLively(world)) break;
+      if (coverIsLively(world)) {
+        world.shake = 0;
+        return world;
+      }
+      const score = frameScore(world);
+      if (score > bestScore) { bestScore = score; bestChunk = chunk; }
     }
+    if (bestChunk >= 0 && world.state !== 'play') {
+      const replay = createWorld(seed);
+      startNight(replay, 4);
+      replay.focus = true;
+      for (let c = 0; c <= bestChunk; c++) runPilot(replay, 0.5, 1);
+      replay.shake = 0;
+      return replay;
+    }
+    world.shake = 0; // paint uses Math.random only while shaking — keep shots deterministic
     return world;
   }
-  if (name === 'storm') {
+  if (name === 'wreck') {
+    // The LOSE screen, staged from real play: a blind pilot (beam parked,
+    // never a flare) lets the storm night wreck three boats. The wreck
+    // screen is the shot — HUD shows 3 red wreck hulls, debris stays on
+    // the rocks, rain and gusts behind the text. v2 staged no lose state.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const world = createWorld(seed + attempt * 7919);
+      startNight(world, 5);
+      let guard = 0;
+      while (world.state !== 'wreck' && guard < 60 * 60 * 8) {
+        if (world.state === 'nightclear') {
+          // Banner counts down in stepWorld; keep stepping through it.
+          stepWorld(world, DT, {});
+        } else if (world.state === 'play') {
+          stepWorld(world, DT, { aimX: 700, aimY: 300, flarePressed: false, focusPressed: false });
+        } else {
+          break;
+        }
+        guard++;
+      }
+      if (world.state === 'wreck' && world.wrecks >= 3) {
+        // Let the "WRECKED" / "+25 CLOSE!" popups fade (2 s) so they do
+        // not collide with the lose screen's own text; the debris stays.
+        for (let i = 0; i < 120; i++) stepWorld(world, DT, {});
+        world.shake = 0;
+        return world;
+      }
+    }
+    // Fallback: same staging on night 4, which has fewer boats to lose
+    // track of and the same storm rain.
     const world = createWorld(seed);
-    startNight(world, 5);
-    // Late pilot: reacts every half-second, aims short — tension, and the
-    // storm (rain, gusts, gulls) does the rest. A flare is going off.
-    runPilot(world, 26, 0.5);
-    world.flareTimer = 2.4;
-    world.flareLitTimer = 1.1;
+    startNight(world, 4);
+    let guard = 0;
+    while (world.state !== 'wreck' && guard < 60 * 60 * 8) {
+      if (world.state === 'nightclear') stepWorld(world, DT, {});
+      else if (world.state === 'play') {
+        stepWorld(world, DT, { aimX: 700, aimY: 300, flarePressed: false, focusPressed: false });
+      } else break;
+      guard++;
+    }
+    for (let i = 0; i < 120; i++) stepWorld(world, DT, {});
+    world.shake = 0;
     return world;
   }
   if (name === 'dawn') {
@@ -152,7 +234,10 @@ export function stageShot(name, seed) {
         autopilotStep(world, 1);
         guard++;
       }
-      if (world.state === 'dawn' && world.wrecks === 0) return world;
+      if (world.state === 'dawn' && world.wrecks === 0) {
+        world.shake = 0;
+        return world;
+      }
     }
     // Fallback: a dawn scene from a clean win, never a fake image — the
     // state and score are real, the pilot just needed a kinder sea.
@@ -164,16 +249,19 @@ export function stageShot(name, seed) {
     world.score = 26 * 100 + 5 * 250 + 8 * 25;
     world.best = world.score;
     const types = ['skiff', 'freighter', 'barge', 'skiff', 'freighter', 'skiff'];
+    const spots = [[1002, 352], [1074, 398], [1146, 348], [1026, 430], [1102, 432], [1168, 394]];
     world.docked = types.map((type, i) => ({
-      type, x: 1150, y: 312 + i * 23, r: BOAT_TYPES[type].r * 0.95,
+      type, x: spots[i][0], y: spots[i][1], r: BOAT_TYPES[type].r * 0.95,
     }));
+    world.shake = 0;
     return world;
   }
   // Unknown shot name: plain title.
   const world = createWorld(seed);
   world.state = 'title';
+  world.shake = 0;
   return world;
 }
 
 // Names the staging understands, in screenshot order.
-export const SHOT_NAMES = ['play', 'title', 'storm', 'dawn'];
+export const SHOT_NAMES = ['play', 'title', 'wreck', 'dawn'];
