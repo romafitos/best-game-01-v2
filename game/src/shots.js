@@ -97,7 +97,8 @@ function runPilot(world, seconds, skill) {
 }
 
 // Score a frame for the replay fallback: boats mid-frame and lit count
-// most, a visible popup and a flare-free frame count too.
+// most, a visible popup and a flare-free frame count too. A COMBO frame
+// scores extra — it is the skill chain the dossier must show (plan 007).
 function frameScore(world) {
   const mid = world.boats.filter((b) => !b.saved && !b.wrecked && b.x > 400 && b.x < 1000);
   const lit = mid.filter((b) => b.lit).length;
@@ -106,6 +107,9 @@ function frameScore(world) {
   const anyText = world.particles.some((p) => p.kind === 'text');
   if (freshText) score += 15;
   else if (anyText) score += 5;
+  const texts = world.particles.filter((p) => p.kind === 'text');
+  if (texts.some((p) => p.text.startsWith('COMBO'))) score += 10;
+  if (texts.length > 1) score += Math.min(10, (texts.length - 1) * 5);
   if (world.flareTimer <= 0) score += 5;
   return score;
 }
@@ -127,6 +131,16 @@ function coverIsLively(world) {
   return world.particles.some((p) => p.kind === 'text' && p.x > 350 && p.x < 1050 && p.y > 180 && p.y < 400 && p.life / p.maxLife > 0.8);
 }
 
+// Is this frame ELECTRIC — a lively frame that also shows the skill chain?
+// Lively + (an active combo, or two fresh popups at once). The cover must
+// carry the kinetic-urgency axis, not just a calm moment with a popup.
+function coverIsElectric(world) {
+  if (!coverIsLively(world)) return false;
+  if (world.combo >= 2) return true;
+  const fresh = world.particles.filter((p) => p.kind === 'text' && p.life / p.maxLife > 0.8);
+  return fresh.length >= 2;
+}
+
 // Stage a named shot on a fresh world. Returns the world ready to paint.
 export function stageShot(name, seed) {
   if (name === 'title') {
@@ -142,6 +156,7 @@ export function stageShot(name, seed) {
       b.x = x; b.y = y; b.lit = true;
     }
     world.shake = 0;
+    world.screenT = 1;
     return world;
   }
   if (name === 'play') {
@@ -153,15 +168,18 @@ export function stageShot(name, seed) {
     // Night 4, not 3: rain + gusts + gulls make the cover a storm
     // frame, not a calm one — the danger is visible.
     world.focus = true;
-    // Hunt for a lively frame in half-second chunks. If the night ends
-    // before one is found, replay deterministically to the best chunk
-    // seen — never hand the judge a night-clear banner as the cover.
+    // Hunt for a lively frame in half-second chunks. Two tiers (plan 007):
+    // chunks 0–39 want an ELECTRIC frame (lively + combo/2 popups); chunks
+    // 40–79 accept any lively frame. If the night ends before one is
+    // found, replay deterministically to the best chunk seen — never hand
+    // the judge a night-clear banner as the cover.
     let bestChunk = -1, bestScore = -1;
     for (let chunk = 0; chunk < 80; chunk++) {
       runPilot(world, 0.5, 1);
       if (world.state !== 'play') break;
-      if (coverIsLively(world)) {
+      if (chunk < 40 ? coverIsElectric(world) : coverIsLively(world)) {
         world.shake = 0;
+        world.screenT = 1;
         return world;
       }
       const score = frameScore(world);
@@ -173,9 +191,11 @@ export function stageShot(name, seed) {
       replay.focus = true;
       for (let c = 0; c <= bestChunk; c++) runPilot(replay, 0.5, 1);
       replay.shake = 0;
+      replay.screenT = 1;
       return replay;
     }
-    world.shake = 0; // paint uses Math.random only while shaking — keep shots deterministic
+    world.shake = 0;
+    world.screenT = 1; // settled screen for the shot (plan 001)
     return world;
   }
   if (name === 'wreck') {
@@ -203,6 +223,7 @@ export function stageShot(name, seed) {
         // not collide with the lose screen's own text; the debris stays.
         for (let i = 0; i < 120; i++) stepWorld(world, DT, {});
         world.shake = 0;
+        world.screenT = 1;
         return world;
       }
     }
@@ -220,6 +241,7 @@ export function stageShot(name, seed) {
     }
     for (let i = 0; i < 120; i++) stepWorld(world, DT, {});
     world.shake = 0;
+    world.screenT = 1;
     return world;
   }
   if (name === 'dawn') {
@@ -236,6 +258,7 @@ export function stageShot(name, seed) {
       }
       if (world.state === 'dawn' && world.wrecks === 0) {
         world.shake = 0;
+        world.screenT = 1;
         return world;
       }
     }
@@ -254,12 +277,14 @@ export function stageShot(name, seed) {
       type, x: spots[i][0], y: spots[i][1], r: BOAT_TYPES[type].r * 0.95,
     }));
     world.shake = 0;
+    world.screenT = 1;
     return world;
   }
   // Unknown shot name: plain title.
   const world = createWorld(seed);
   world.state = 'title';
   world.shake = 0;
+  world.screenT = 1;
   return world;
 }
 

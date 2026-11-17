@@ -28,12 +28,24 @@ const canvas = document.getElementById('game');
 const status = document.getElementById('status');
 const ctx = canvas.getContext('2d');
 
+// OS motion preference (plan 004): reduced motion drops shake/flash and
+// settles screen transitions at once. Headless Chromium reports
+// no-preference, so screenshots are unaffected.
+function applyMotionPrefs(world) {
+  try {
+    if (typeof window.matchMedia === 'function') {
+      world.reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    }
+  } catch (e) { /* motion prefs are cosmetic, never fatal */ }
+}
+
 function announce(message) {
   status.textContent = message;
 }
 
 function runShot(name) {
   const world = stageShot(name, seed);
+  applyMotionPrefs(world);
   const ui = { paused: false, muted: false };
   let painted = 0;
   function paintFrame() {
@@ -47,6 +59,7 @@ function runShot(name) {
 
 function runGame() {
   let world = createWorld(seed);
+  applyMotionPrefs(world);
   const input = createInput(canvas);
   const audio = createAudio();
   const ui = { paused: false, muted: false };
@@ -57,6 +70,7 @@ function runGame() {
 
   function freshRun() {
     world = createWorld(Math.floor(Math.random() * 4294967296));
+    applyMotionPrefs(world);
     prevSaved = 0; prevWrecks = 0; prevNight = 1; prevState = world.state;
     accumulator = 0;
   }

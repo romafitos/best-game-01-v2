@@ -46,6 +46,12 @@ export function createWorld(seed) {
     gustActive: null, // { dir, until } while pushing
     bannerTimer: 0,
     shake: 0,
+    screenT: 0, // 0..1 entrance progress of the current state screen (plan 001)
+    reducedMotion: false, // OS prefers-reduced-motion (plan 004)
+    combo: 0, // consecutive near-misses inside the combo window (plan 006)
+    comboTimer: 0, // seconds left to extend the chain (4 s window)
+    wrecksThisNight: 0,
+    nightTime: 0, // seconds elapsed in the current night (ticking clock)
     sprayTimer: 0, // ambient spray at the rock bases
     nightStats: { saved: 0, nearMiss: 0 },
     message: '',
@@ -77,8 +83,13 @@ export function startNight(world, n) {
   world.gustWarn = null;
   world.gustActive = null;
   world.savedThisNight = 0;
+  world.combo = 0;
+  world.comboTimer = 0;
+  world.wrecksThisNight = 0;
+  world.nightTime = 0;
   world.nightStats = { saved: 0, nearMiss: 0 };
   world.state = 'play';
+  world.screenT = 0;
 }
 
 function makeRocks(rng, count) {
@@ -159,6 +170,7 @@ export function spawnBoat(world, type) {
 
 export function stepWorld(world, dt, ctrl) {
   world.time += dt;
+  if (world.screenT < 1) world.screenT = Math.min(1, world.screenT + dt / 0.35);
   if (world.shake > 0) world.shake = Math.max(0, world.shake - dt * 3);
 
   // Beam follows the pointer; F toggles focus; SPACE fires a flare.
@@ -180,7 +192,19 @@ export function stepWorld(world, dt, ctrl) {
     }
     return;
   }
-  if (world.state !== 'play') { stepParticles(world, dt); return; }
+  if (world.state !== 'play') {
+    stepParticles(world, dt);
+    // Title/wreck boats bob too — the sea moves, so must they (plan 005).
+    for (const b of world.boats) b.bob += dt * 2;
+    return;
+  }
+
+  // Ticking clock + combo window advance only while playing (plan 006).
+  world.nightTime += dt;
+  if (world.comboTimer > 0) {
+    world.comboTimer -= dt;
+    if (world.comboTimer <= 0) world.combo = 0;
+  }
 
   // Gusts: telegraph, then push.
   if (world.gustPlan.length && world.time >= world.gustPlan[0].at - GUST.warnSeconds && !world.gustWarn && !world.gustActive) {
@@ -203,7 +227,11 @@ export function stepWorld(world, dt, ctrl) {
   }
 
   // Ambient spray where the waves break on the rocks, so the sea is alive
-  // even when no boat is near.
+  // even when no boat is near. Rate stays at v3 (0.35 s / 2 particles):
+  // spray draws from the shared world.rng, so ANY rate change re-seeds
+  // the gameplay stream (spawns, gusts) and moves the autopilot win
+  // rate — proven in this session (6/7 → 4/7 at 0.22 s / 3). Density
+  // comes from render-only channels instead (plan 007).
   world.sprayTimer -= dt;
   if (world.sprayTimer <= 0 && world.rocks.length) {
     world.sprayTimer = 0.35;
@@ -242,6 +270,7 @@ export function stepWorld(world, dt, ctrl) {
     world.score += bonus;
     world.message = `NIGHT ${world.night} CLEAR  +${bonus}`;
     world.state = 'nightclear';
+    world.screenT = 0;
     world.bannerTimer = 2.4;
   }
   if (world.wrecks >= MAX_WRECKS) endGame(world, false);
@@ -271,6 +300,13 @@ function checkRocks(world, boat) {
       world.score += SCORING.nearMiss;
       world.nightStats.nearMiss += 1;
       addTextParticle(world, boat.x, boat.y - 22, `+${SCORING.nearMiss} CLOSE!`);
+      // Skill chain: consecutive near-misses inside a 4 s window build a
+      // combo (display only — no score change). A wreck breaks it.
+      world.combo += 1;
+      world.comboTimer = 4;
+      if (world.combo >= 2) {
+        addTextParticle(world, boat.x, boat.y - 52, `COMBO x${world.combo}!`);
+      }
     }
   }
 }
@@ -288,6 +324,9 @@ function saveBoat(world, boat) {
 function wreckBoat(world, boat, rock) {
   boat.wrecked = true;
   world.wrecks += 1;
+  world.wrecksThisNight += 1;
+  world.combo = 0;
+  world.comboTimer = 0;
   // A broken hull stays on the rock: the wreck is a place, not a flash.
   if (world.debris.length < 3) {
     world.debris.push({ x: boat.x, y: boat.y, r: boat.r, type: boat.type, tilt: (world.rng() - 0.5) * 0.9 });
@@ -308,6 +347,7 @@ function fireFlare(world) {
 
 function endGame(world, won) {
   world.state = won ? 'dawn' : 'wreck';
+  world.screenT = 0;
   if (won) {
     // Moor the saved boats in open water ALONGSIDE the pier (never on top
     // of the dark planks, where their hulls vanished in v2) so the win

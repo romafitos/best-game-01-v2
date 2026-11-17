@@ -17,8 +17,13 @@ function wobble(seed, salt) {
 
 export function paint(ctx, world, ui) {
   ctx.save();
-  if (world.shake > 0) {
-    ctx.translate((Math.random() - 0.5) * world.shake * 7, (Math.random() - 0.5) * world.shake * 7);
+  if (world.shake > 0 && !world.reducedMotion) {
+    // Deterministic decaying-sine judder (plan 004): driven by world.time,
+    // never Math.random — screenshots stay byte-identical even mid-shake.
+    // Quadratic envelope: one hard hit that settles fast, not a rattle.
+    const env = world.shake * world.shake;
+    const t = world.time * 47;
+    ctx.translate(Math.sin(t) * env * 5, Math.cos(t * 1.3) * env * 4);
   }
   const dawn = world.state === 'dawn';
   paintSky(ctx, world, dawn);
@@ -46,6 +51,15 @@ export function paint(ctx, world, ui) {
 
 // --- sky & sea ---------------------------------------------------------------
 
+// Screen-transition easing (plan 001): easeOutCubic over 350 ms, driven by
+// world.screenT (advanced in stepWorld). Reduced motion: settled at once —
+// opacity feedback is kept, position change is dropped (plan 004).
+function screenEase(world) {
+  if (world.reducedMotion) return 1;
+  const t = world.screenT ?? 1;
+  return 1 - Math.pow(1 - t, 3);
+}
+
 function paintSky(ctx, world, dawn) {
   const g = ctx.createLinearGradient(0, 0, 0, HORIZON_Y);
   if (dawn) {
@@ -69,19 +83,20 @@ function paintSky(ctx, world, dawn) {
       const s = 0.4 + ((i * 7) % 10) / 14;
       ctx.fillRect(x, y, s, s);
     }
-    // Moon, clear of the HUD buttons (which start at x=1120).
+    // Moon, clear of the HUD bar (60 px tall) and buttons (x=1120).
     ctx.fillStyle = '#f4ead2';
-    ctx.beginPath(); ctx.arc(1000, 52, 22, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(1000, 88, 22, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = 'rgba(244,234,210,0.25)';
-    ctx.beginPath(); ctx.arc(1000, 52, 30, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(1000, 88, 30, 0, Math.PI * 2); ctx.fill();
   } else {
     // Rising sun, bigger and warmer than v1: dawn is the payoff.
+    // Centred below the HUD bar so the disc reads whole, not sliced.
     ctx.fillStyle = '#ffd97a';
-    ctx.beginPath(); ctx.arc(1000, 62, 30, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(1000, 98, 30, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = 'rgba(255,217,122,0.35)';
-    ctx.beginPath(); ctx.arc(1000, 62, 48, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(1000, 98, 48, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = 'rgba(255,190,120,0.18)';
-    ctx.beginPath(); ctx.arc(1000, 62, 70, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(1000, 98, 70, 0, Math.PI * 2); ctx.fill();
   }
 }
 
@@ -116,7 +131,7 @@ function paintSea(ctx, world, dawn) {
   // Whitecaps: short bright dashes on the wave crests.
   ctx.strokeStyle = dawn ? 'rgba(255,230,190,0.35)' : 'rgba(200,230,250,0.28)';
   ctx.lineWidth = 2;
-  for (let i = 0; i < 26; i++) {
+  for (let i = 0; i < 36; i++) {
     const x = (i * 211 + 60) % VIEW.w;
     const y = HORIZON_Y + 44 + ((i * 89) % 300);
     const w = 14 + wobble(i, 3) * 18;
@@ -242,7 +257,11 @@ function paintHeadland(ctx, world) {
 
 function paintRocks(ctx, world) {
   for (const rock of world.rocks) {
-    const lit = world.flareTimer > 0;
+    // Rock-lit crossfade (plan 002): 0..1, in over the first 0.15 s of a
+    // flare, out over the last 0.3 s — never a binary flip.
+    const litT = world.flareTimer > 0
+      ? Math.min(1, (3 - world.flareTimer) / 0.15) * Math.min(1, world.flareTimer / 0.3)
+      : 0;
     // Grounding shadow: a dark ellipse under the rock roots it in the
     // water, so the spikes read as stone rising from the sea, not a
     // floating tent.
@@ -253,34 +272,48 @@ function paintRocks(ctx, world) {
     // Jagged silhouette: 3-5 NARROW triangular spikes of uneven height
     // (up to 1.5r), never a smooth dome — a rock must read as a danger,
     // not an island. v2's wide mounds + full foam ring read as atolls.
-    ctx.fillStyle = lit ? '#5a5148' : '#0d1219';
-    ctx.beginPath();
-    ctx.moveTo(rock.x - rock.r, rock.y + rock.r * 0.5);
+    // Built once as a Path2D so the lit pass can paint the same shape.
     const peaks = rock.peaks || 3;
+    const sil = new Path2D();
+    sil.moveTo(rock.x - rock.r, rock.y + rock.r * 0.5);
     for (let k = 0; k < peaks; k++) {
       // Each spike: a sharp apex with a narrow base, heights alternating
       // tall/short so the skyline is broken, not rounded.
       const apexX = rock.x - rock.r * 0.85 + (k + 0.5) * (rock.r * 1.7) / peaks;
       const apexY = rock.y - rock.r * (0.85 + wobble(rock.id, k + 1) * 0.65);
       const baseX = rock.x - rock.r * 0.85 + k * (rock.r * 1.7) / peaks;
-      ctx.lineTo(baseX, rock.y + rock.r * 0.15);
-      ctx.lineTo(apexX, apexY);
+      sil.lineTo(baseX, rock.y + rock.r * 0.15);
+      sil.lineTo(apexX, apexY);
     }
-    ctx.lineTo(rock.x + rock.r, rock.y + rock.r * 0.15);
-    ctx.lineTo(rock.x + rock.r, rock.y + rock.r * 0.5);
-    ctx.closePath(); ctx.fill();
+    sil.lineTo(rock.x + rock.r, rock.y + rock.r * 0.15);
+    sil.lineTo(rock.x + rock.r, rock.y + rock.r * 0.5);
+    sil.closePath();
+    ctx.fillStyle = '#0d1219';
+    ctx.fill(sil);
+    if (litT > 0) {
+      ctx.save();
+      ctx.globalAlpha = litT;
+      ctx.fillStyle = '#5a5148';
+      ctx.fill(sil);
+      ctx.restore();
+    }
     // Cold rim light on the beam side, tracing one spike edge, so the
-    // rock reads as solid stone with a sharp edge.
-    ctx.strokeStyle = lit ? 'rgba(255,240,190,0.6)' : 'rgba(150,190,220,0.4)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
+    // rock reads as solid stone with a sharp edge. Crossfades cold→warm
+    // with the flare (two strokes of one Path2D, alpha-weighted).
     const rimK = 1 + Math.floor(wobble(rock.id, 7) * (peaks - 1));
     const rimX = rock.x - rock.r * 0.85 + (rimK + 0.5) * (rock.r * 1.7) / peaks;
     const rimY = rock.y - rock.r * (0.85 + wobble(rock.id, rimK + 1) * 0.65);
-    ctx.moveTo(rimX - rock.r * 0.28, rimY + rock.r * 0.5);
-    ctx.lineTo(rimX, rimY);
-    ctx.lineTo(rimX + rock.r * 0.22, rimY + rock.r * 0.55);
-    ctx.stroke();
+    const rim = new Path2D();
+    rim.moveTo(rimX - rock.r * 0.28, rimY + rock.r * 0.5);
+    rim.lineTo(rimX, rimY);
+    rim.lineTo(rimX + rock.r * 0.22, rimY + rock.r * 0.55);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = `rgba(150,190,220,${0.4 * (1 - litT)})`;
+    ctx.stroke(rim);
+    if (litT > 0) {
+      ctx.strokeStyle = `rgba(255,240,190,${0.6 * litT})`;
+      ctx.stroke(rim);
+    }
     // Spray ticks at the waterline, left and right of the base — short
     // dashes, never an arc over the top (v3's arc read as a tent roof).
     const pulse = 0.5 + 0.5 * Math.sin(world.time * 2.4 + rock.id * 1.7);
@@ -295,7 +328,7 @@ function paintRocks(ctx, world) {
       ctx.stroke();
     }
     // Thin foam waterline where the waves break.
-    ctx.strokeStyle = lit ? 'rgba(255,255,255,0.7)' : 'rgba(200,230,250,0.4)';
+    ctx.strokeStyle = `rgba(200,230,250,${0.4 + 0.3 * litT})`;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(rock.x - rock.r - 4, rock.y + rock.r * 0.5);
@@ -335,7 +368,7 @@ function paintBeam(ctx, world) {
   ctx.closePath(); ctx.fill();
   // Dust motes drifting inside the beam: the light has body.
   ctx.fillStyle = 'rgba(255,244,200,0.5)';
-  for (let i = 0; i < 14; i++) {
+  for (let i = 0; i < 20; i++) {
     const along = 120 + wobble(i, 11) * 700;
     const across = (wobble(i, 23) - 0.5) * 2 * Math.tan(cfg.halfAngle) * along * 0.8;
     const mx = LAMP.x + Math.cos(a) * along - Math.sin(a) * across;
@@ -344,18 +377,22 @@ function paintBeam(ctx, world) {
   }
   ctx.restore();
   // Flare burst: a real flash, not a faint glow — the whole sky notices.
-  // Two layers: a wide wash plus a hot core at the lamp.
+  // Two layers: a wide wash plus a hot core at the lamp. Hold-then-decay
+  // (plan 002): full brightness for 0.4 s after firing, then a fast
+  // f^2.2 falloff — a burst, not a dimmer. Reduced motion: a glow, not
+  // a flash (plan 004).
   if (world.flareTimer > 0) {
-    const f = world.flareTimer / 3;
+    const e = world.flareTimer > 2.6 ? 1 : Math.pow(world.flareTimer / 2.6, 2.2);
+    const wash = e * (world.reducedMotion ? 0.4 : 1);
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const fg = ctx.createRadialGradient(LAMP.x, LAMP.y, 4, LAMP.x, LAMP.y, 320 * f + 80);
-    fg.addColorStop(0, `rgba(255,240,180,${0.5 * f})`);
+    const fg = ctx.createRadialGradient(LAMP.x, LAMP.y, 4, LAMP.x, LAMP.y, 320 * e + 80);
+    fg.addColorStop(0, `rgba(255,240,180,${0.5 * wash})`);
     fg.addColorStop(1, 'rgba(255,240,180,0)');
     ctx.fillStyle = fg;
-    ctx.beginPath(); ctx.arc(LAMP.x, LAMP.y, 320 * f + 80, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(LAMP.x, LAMP.y, 320 * e + 80, 0, Math.PI * 2); ctx.fill();
     const core = ctx.createRadialGradient(LAMP.x, LAMP.y, 2, LAMP.x, LAMP.y, 90);
-    core.addColorStop(0, `rgba(255,252,220,${0.4 * f})`);
+    core.addColorStop(0, `rgba(255,252,220,${0.4 * wash})`);
     core.addColorStop(1, 'rgba(255,252,220,0)');
     ctx.fillStyle = core;
     ctx.beginPath(); ctx.arc(LAMP.x, LAMP.y, 90, 0, Math.PI * 2); ctx.fill();
@@ -377,6 +414,17 @@ function paintBoats(ctx, world) {
     ctx.moveTo(boat.x - boat.r - 4, y + 5);
     ctx.lineTo(boat.x - boat.r - 26, y);
     ctx.stroke();
+    if (boat.lit) {
+      // Speed streaks: a lit boat is being rescued at speed, not drifting.
+      ctx.strokeStyle = 'rgba(220,240,255,0.4)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(boat.x - boat.r - 30, y + 12);
+      ctx.lineTo(boat.x - boat.r - 52, y + 18);
+      ctx.moveTo(boat.x - boat.r - 30, y + 6);
+      ctx.lineTo(boat.x - boat.r - 52, y);
+      ctx.stroke();
+    }
     // Lit boats carry a warm halo: you can tell at a glance who is safe.
     if (boat.lit) {
       const halo = ctx.createRadialGradient(boat.x, y, 4, boat.x, y, boat.r * 2.6);
@@ -406,13 +454,19 @@ function paintBoats(ctx, world) {
       ctx.fillStyle = 'rgba(255,240,170,0.35)';
       ctx.beginPath(); ctx.arc(boat.x, lampY, 3.5, 0, Math.PI * 2); ctx.fill();
     }
-    // Damage smoke after a rock graze.
+    // Damage smoke after a rock graze. Each puff fades out over the last
+    // quarter of its cycle, so it dissolves instead of teleporting when
+    // the cycle wraps (plan 005).
     if (boat.hits < boat.maxHits) {
-      ctx.fillStyle = 'rgba(140,140,140,0.55)';
+      const ph1 = ((world.time * 20) % 14) / 14;
+      const ph2 = ((world.time * 20 + 7) % 14) / 14;
+      const fade1 = ph1 > 0.75 ? (1 - ph1) / 0.25 : 1;
+      const fade2 = ph2 > 0.75 ? (1 - ph2) / 0.25 : 1;
+      ctx.fillStyle = `rgba(140,140,140,${0.55 * fade1})`;
       ctx.beginPath();
       ctx.arc(boat.x - boat.r * 0.3, y - boat.r * 1.4 - ((world.time * 20) % 14), 6, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = 'rgba(160,160,160,0.4)';
+      ctx.fillStyle = `rgba(160,160,160,${0.4 * fade2})`;
       ctx.beginPath();
       ctx.arc(boat.x - boat.r * 0.1, y - boat.r * 1.8 - ((world.time * 20 + 7) % 14), 4, 0, Math.PI * 2);
       ctx.fill();
@@ -540,16 +594,29 @@ function paintParticles(ctx, world) {
     if (p.kind === 'text') {
       // Big, outlined popups on a dark backing plate: a "+25 CLOSE!"
       // must read over the pale beam as well as over dark sea.
-      ctx.font = 'bold 23px Georgia, serif';
+      // Pop-in (plan 003): scale 0.92→1.0 over the first 150 ms
+      // (ease-out), full opacity for the first 70% of life, fade only
+      // at the end — never a ghost, never from nowhere.
+      const r = p.life / p.maxLife;
+      const age = 1 - r;
+      const fadeA = r < 0.3 ? r / 0.3 : 1;
+      const s = 0.92 + 0.08 * (1 - Math.pow(1 - Math.min(1, age / 0.15), 3));
+      const isCombo = p.text.startsWith('COMBO');
+      ctx.font = isCombo ? 'bold 28px Georgia, serif' : 'bold 23px Georgia, serif';
       ctx.textAlign = 'center';
       const w = ctx.measureText(p.text).width;
-      ctx.fillStyle = `rgba(4,10,20,${a * 0.75})`;
-      ctx.fillRect(p.x - w / 2 - 8, p.y - 20, w + 16, 28);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.scale(s, s);
+      ctx.fillStyle = `rgba(4,10,20,${fadeA * 0.75})`;
+      ctx.fillRect(-w / 2 - 8, -20, w + 16, 28);
       ctx.lineWidth = 4;
-      ctx.strokeStyle = `rgba(4,10,20,${a * 0.9})`;
-      ctx.strokeText(p.text, p.x, p.y);
-      ctx.fillStyle = p.text === 'WRECKED' ? `rgba(255,120,90,${a})` : `rgba(255,240,170,${a})`;
-      ctx.fillText(p.text, p.x, p.y);
+      ctx.strokeStyle = `rgba(4,10,20,${fadeA * 0.9})`;
+      ctx.strokeText(p.text, 0, 0);
+      ctx.fillStyle = p.text === 'WRECKED' ? `rgba(255,120,90,${fadeA})`
+        : isCombo ? `rgba(255,217,122,${fadeA})` : `rgba(255,240,170,${fadeA})`;
+      ctx.fillText(p.text, 0, 0);
+      ctx.restore();
     } else if (p.kind === 'wreck') {
       ctx.fillStyle = `rgba(200,90,60,${a})`;
       ctx.fillRect(p.x - 2, p.y - 2, 5, 5);
@@ -564,14 +631,17 @@ function paintParticles(ctx, world) {
 }
 
 // Rain: diagonal streaks, only when the night has rain. Night 5 is a storm.
+// Per-drop speed 0.8–1.2x (seeded wobble), so the storm stops reading as
+// a conveyor belt (plan 007).
 function paintRain(ctx, world) {
   if (world.rain <= 0.02 || world.state === 'title' || world.state === 'dawn') return;
-  const n = Math.floor(110 * world.rain);
+  const n = Math.floor(150 * world.rain);
   ctx.strokeStyle = `rgba(190,215,235,${0.3 * world.rain + 0.08})`;
   ctx.lineWidth = 1.5;
   for (let i = 0; i < n; i++) {
     const x = (i * 97 + 31) % (VIEW.w + 80);
-    const y = (i * 173 + world.time * 430) % (VIEW.h - HORIZON_Y) + HORIZON_Y;
+    const spd = 430 * (0.8 + wobble(i, 5) * 0.4);
+    const y = (i * 173 + world.time * spd) % (VIEW.h - HORIZON_Y) + HORIZON_Y;
     ctx.beginPath();
     ctx.moveTo(x, y);
     ctx.lineTo(x - 9, y + 16);
@@ -580,14 +650,18 @@ function paintRain(ctx, world) {
 }
 
 // The current, made visible: foam chevrons drifting with the flow, so the
-// player can see which way an unlit boat will wander.
+// player can see which way an unlit boat will wander. Each chevron fades
+// out over the last 40 px of its run instead of teleporting at the wrap
+// (plan 005).
 function paintCurrent(ctx, world) {
   if (world.state !== 'play' || world.current <= 0) return;
-  ctx.strokeStyle = 'rgba(200,230,250,0.3)';
   ctx.lineWidth = 2;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 7; i++) {
     const x = 330 + i * 170;
-    const y = HORIZON_Y + 40 + ((world.time * 14 + i * 67) % 280);
+    const cy = (world.time * 14 + i * 67) % 280;
+    const fade = cy > 240 ? (280 - cy) / 40 : 1;
+    const y = HORIZON_Y + 40 + cy;
+    ctx.strokeStyle = `rgba(200,230,250,${0.35 * fade})`;
     ctx.beginPath();
     ctx.moveTo(x - 8, y);
     ctx.lineTo(x, y + 8);
@@ -606,7 +680,7 @@ function paintFog(ctx, world) {
   ctx.fillRect(0, HORIZON_Y, VIEW.w, VIEW.h - HORIZON_Y);
   // Drifting fog banks.
   ctx.fillStyle = `rgba(190,205,220,${world.fog * 0.35})`;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     const fx = ((world.time * 12 * (i + 1)) % (VIEW.w + 500)) - 250;
     ctx.beginPath();
     ctx.ellipse(fx + i * 420, 200 + i * 70, 190, 26, 0, 0, Math.PI * 2);
@@ -625,9 +699,11 @@ function paintGustWarn(ctx, world) {
 // --- HUD & screens -----------------------------------------------------------
 
 function paintHUD(ctx, world, ui) {
-  // Top bar.
+  // Top bar (60 px: row 1 chrome + row 2 urgency ticker, plan 006).
   ctx.fillStyle = 'rgba(6,16,30,0.72)';
-  ctx.fillRect(0, 0, VIEW.w, 44);
+  ctx.fillRect(0, 0, VIEW.w, 60);
+  ctx.fillStyle = 'rgba(234,244,255,0.12)';
+  ctx.fillRect(0, 60, VIEW.w, 1);
   ctx.fillStyle = '#ffe9a8';
   ctx.font = 'bold 20px Georgia, serif';
   ctx.textAlign = 'left';
@@ -664,6 +740,33 @@ function paintHUD(ctx, world, ui) {
   ctx.textAlign = 'center';
   ctx.fillText(ui.paused ? '▶' : '❚❚', 1150, 28);
   ctx.fillText(ui.muted ? 'MUTE ✓' : 'SOUND', 1220, 28);
+  // Row 2 — urgency ticker (plan 006): night clock, dawn progress, combo.
+  ctx.textAlign = 'left';
+  ctx.font = '14px Georgia, serif';
+  ctx.fillStyle = '#eaf4ff';
+  const mins = Math.floor((world.nightTime || 0) / 60);
+  const secs = Math.floor((world.nightTime || 0) % 60);
+  ctx.fillText(`NIGHT ${world.night}/${NIGHT_COUNT}  ${mins}:${String(secs).padStart(2, '0')}`, 16, 53);
+  const resolved = world.savedThisNight + (world.wrecksThisNight || 0);
+  const total = NIGHTS[world.night - 1].boats;
+  ctx.fillStyle = 'rgba(234,244,255,0.18)';
+  ctx.fillRect(170, 45, 220, 8);
+  ctx.fillStyle = '#ffe9a8';
+  ctx.fillRect(170, 45, 220 * resolved / total, 8);
+  ctx.fillStyle = '#eaf4ff';
+  ctx.fillText(`DAWN ${resolved}/${total}`, 400, 53);
+  if (world.combo >= 2) {
+    // Gold combo badge, gently pulsing — the chain is the skill record.
+    const pulse = 1 + 0.05 * Math.sin(world.time * 6);
+    ctx.save();
+    ctx.translate(640, 53);
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = '#ffd97a';
+    ctx.font = 'bold 15px Georgia, serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`COMBO x${world.combo}`, 0, 0);
+    ctx.restore();
+  }
   ctx.textAlign = 'left';
 }
 
@@ -673,11 +776,14 @@ function dimScreen(ctx, alpha) {
 }
 
 function paintTitle(ctx, world) {
-  dimScreen(ctx, 0.45);
+  const e = screenEase(world);
+  dimScreen(ctx, 0.45 * e);
+  ctx.save();
+  ctx.globalAlpha = e;
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffe9a8';
   ctx.font = 'bold 84px Georgia, serif';
-  ctx.fillText('TIDEKEEPER', VIEW.w / 2, 168);
+  ctx.fillText('TIDEKEEPER', VIEW.w / 2, 168 - 12 * (1 - e));
   ctx.fillStyle = '#eaf4ff';
   ctx.font = '22px Georgia, serif';
   ctx.fillText('Guide the night boats home with your lighthouse beam.', VIEW.w / 2, 208);
@@ -694,30 +800,39 @@ function paintTitle(ctx, world) {
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 24px Georgia, serif';
   ctx.fillText('CLICK or press ENTER to start', VIEW.w / 2, 356);
+  ctx.restore();
   ctx.textAlign = 'left';
 }
 
 function paintBanner(ctx, world) {
-  dimScreen(ctx, 0.25);
+  const e = screenEase(world);
+  dimScreen(ctx, 0.25 * e);
+  ctx.save();
+  ctx.globalAlpha = e;
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffe9a8';
   ctx.font = 'bold 44px Georgia, serif';
-  ctx.fillText(world.message, VIEW.w / 2, 220);
+  ctx.fillText(world.message, VIEW.w / 2, 220 - 12 * (1 - e));
   ctx.fillStyle = '#eaf4ff';
   ctx.font = '20px Georgia, serif';
   ctx.fillText(world.night >= NIGHT_COUNT ? 'Dawn is coming…' : `Night ${world.night + 1} approaches — ready your beam`, VIEW.w / 2, 258);
+  ctx.restore();
   ctx.textAlign = 'left';
 }
 
 function paintDawn(ctx, world) {
-  dimScreen(ctx, 0.28);
+  const e = screenEase(world);
+  dimScreen(ctx, 0.28 * e);
   // The docked boats are the payoff: re-paint them above the dim so
   // their hulls and lanterns read instead of sinking into the murk.
+  // They stay OUTSIDE the text fade — the payoff does not fade.
   for (const d of world.docked) paintMooredBoat(ctx, d);
+  ctx.save();
+  ctx.globalAlpha = e;
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffe9a8';
   ctx.font = 'bold 64px Georgia, serif';
-  ctx.fillText('DAWN BREAKS', VIEW.w / 2, 170);
+  ctx.fillText('DAWN BREAKS', VIEW.w / 2, 170 - 12 * (1 - e));
   ctx.fillStyle = '#ffffff';
   ctx.font = '24px Georgia, serif';
   // Honest headline: only claim "every boat is home" when no boat wrecked.
@@ -736,15 +851,19 @@ function paintDawn(ctx, world) {
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 22px Georgia, serif';
   ctx.fillText('Press R to play again', VIEW.w / 2, 336);
+  ctx.restore();
   ctx.textAlign = 'left';
 }
 
 function paintWreck(ctx, world) {
-  dimScreen(ctx, 0.42);
+  const e = screenEase(world);
+  dimScreen(ctx, 0.42 * e);
+  ctx.save();
+  ctx.globalAlpha = e;
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ff9a7a';
   ctx.font = 'bold 56px Georgia, serif';
-  ctx.fillText('THE ROCKS CLAIM THREE', VIEW.w / 2, 170);
+  ctx.fillText('THE ROCKS CLAIM THREE', VIEW.w / 2, 170 - 12 * (1 - e));
   ctx.fillStyle = '#eaf4ff';
   ctx.font = '22px Georgia, serif';
   ctx.fillText(`Night ${world.night} — ${world.savedTotal} boats saved, score ${world.score}.`, VIEW.w / 2, 214);
@@ -754,6 +873,7 @@ function paintWreck(ctx, world) {
   ctx.fillStyle = '#ffffff';
   ctx.font = 'bold 22px Georgia, serif';
   ctx.fillText('Press R to try again', VIEW.w / 2, 288);
+  ctx.restore();
   ctx.textAlign = 'left';
 }
 
